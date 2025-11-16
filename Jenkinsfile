@@ -2,7 +2,7 @@ pipeline {
   agent any
 
   environment {
-    DEPLOY_DIR = 'C:\\inetpub\\wwwroot'
+    DEPLOY_DIR = 'C:\\inetpub\\wwwroot' // still fine for Groovy env usage
     GIT_CREDS  = 'github-pat'
   }
 
@@ -24,11 +24,12 @@ pipeline {
 
     stage('Deploy to IIS (localhost)') {
       steps {
-        // Run PowerShell directly (not through 'bat') to avoid cmd/caret issues.
+        // Run PowerShell directly (no cmd/caret issues). Use forward slashes in paths to avoid Groovy escaping problems.
         powershell script: '''
 Write-Output "=== Deploy to IIS: Starting ==="
 
-$deployDir = 'C:\inetpub\wwwroot'
+# Use forward slashes inside the script to avoid Groovy/backslash parsing problems
+$deployDir = 'C:/inetpub/wwwroot'
 $src = $env:WORKSPACE
 
 Write-Output "Source workspace: $src"
@@ -46,7 +47,7 @@ if (-not (Test-Path $deployDir)) {
 Write-Output "Cleaning target (remove old files)"
 Get-ChildItem -Path $deployDir -Force | Where-Object { $_.Name -notin @('.', '..') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-# Copy files from workspace to target (try robocopy then fallback to copy-item)
+# Copy files from workspace to target (try robocopy then fallback to Copy-Item)
 Write-Output "Copying site files..."
 $robocopyExe = (Get-Command robocopy.exe -ErrorAction SilentlyContinue)
 if ($robocopyExe) {
@@ -54,14 +55,14 @@ if ($robocopyExe) {
     $rc = Start-Process -FilePath $robocopyExe.Path -ArgumentList @("$src","$deployDir","/MIR","/NDL","/NFL","/NJH","/NJS","/NP") -Wait -PassThru
     if ($rc.ExitCode -gt 7) {
         Write-Output "robocopy returned exit code $($rc.ExitCode) (failure) — attempting Copy-Item fallback"
-        Remove-Item -Recurse -Force -Path "$deployDir\*" -ErrorAction SilentlyContinue
-        Copy-Item -Path "$src\*" -Destination $deployDir -Recurse -Force
+        Remove-Item -Recurse -Force -Path "$deployDir/*" -ErrorAction SilentlyContinue
+        Copy-Item -Path "$src/*" -Destination $deployDir -Recurse -Force
     } else {
         Write-Output "robocopy completed (exit $($rc.ExitCode))"
     }
 } else {
     Write-Output "robocopy not found — using Copy-Item"
-    Copy-Item -Path "$src\*" -Destination $deployDir -Recurse -Force
+    Copy-Item -Path "$src/*" -Destination $deployDir -Recurse -Force
 }
 
 # Try to configure IIS if available
@@ -96,7 +97,6 @@ if ($iisAvailable) {
             New-Website -Name 'Default Web Site' -Port 80 -PhysicalPath $deployDir -Force
         } else {
             Write-Output "Default Web Site exists — updating physical path"
-            # Update physical path for the root virtual directory/app
             Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' `
               -filter "system.applicationHost/sites/site[@name='Default Web Site']/application[@path='/']/virtualDirectory[@path='/']" `
               -name physicalPath -value $deployDir -ErrorAction SilentlyContinue
