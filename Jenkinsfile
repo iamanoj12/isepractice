@@ -5,7 +5,7 @@ pipeline {
     GIT_CREDENTIALS = 'github-pat'                // update if you used a different credentials ID
     REPO_URL = 'https://github.com/iamanoj12/isepractice.git' // adjust
     // Default TARGET_DIR for Windows example; adjust as needed
-    TARGET_DIR_WIN = 'C:\Users\DELL\Desktop\portfolio'         // Windows target (adjust)
+    TARGET_DIR_WIN = 'C:\\Users\\DELL\\Desktop\\portfolio'         // Windows target (adjust)
     TARGET_DIR_UNIX = "${env.WORKSPACE}/deployed-site" // safe default for Unix
   }
 
