@@ -24,81 +24,133 @@ pipeline {
 
     stage('Deploy to IIS (localhost)') {
       steps {
-        script {
-          // Copy files to C:\inetpub\wwwroot and configure IIS so site is reachable at http://localhost
-          bat '''
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "Write-Output '=== Deploy to IIS: Starting ==='; ^
-   $deployDir = 'C:\\inetpub\\wwwroot'; $src = '${WORKSPACE}'; ^
-   Write-Output ('Source workspace: ' + $src); Write-Output ('Target (IIS): ' + $deployDir); ^
-   # Ensure target exists
-   if (-not (Test-Path $deployDir)) { Write-Output 'Creating target folder'; New-Item -Path $deployDir -ItemType Directory -Force | Out-Null } else { Write-Output 'Target folder exists' } ; ^
-   # Clean target (optional) - comment out if you don't want to remove existing files
-   Write-Output 'Cleaning target (remove old files)' ; ^
-   Get-ChildItem -Path $deployDir -Force | Where-Object { $_.Name -notin @('.', '..') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue ; ^
-   # Copy files from workspace to target (recursively)
-   Write-Output 'Copying site files...' ; ^
-   robocopy \"$src\" \"$deployDir\" /MIR /NDL /NFL /NJH /NJS /NP || { Write-Output 'robocopy returned non-zero; trying xcopy fallback'; cmd /c \"xcopy /E /I /Y \\\"$src\\\" \\\"$deployDir\\\"\" } ; ^
-   # Ensure IIS service is running
-   Write-Output 'Ensuring W3SVC (IIS) service is present and running...' ; ^
-   try { if ((Get-Service -Name W3SVC -ErrorAction SilentlyContinue) -eq $null) { Write-Output 'W3SVC service not found' } } catch { Write-Output 'Get-Service failed: ' + $_.Exception.Message } ; ^
-   # Try to install / enable IIS if missing (best-effort; may require admin privileges) 
-   $iisInstalled = $false ; 
-   try { Import-Module WebAdministration -ErrorAction Stop; $iisInstalled = $true; Write-Output 'WebAdministration module available (IIS likely installed).' } catch { Write-Output 'WebAdministration module not available: ' + $_.Exception.Message } ; ^
-   if (-not $iisInstalled) { 
-     Write-Output 'Attempting to install IIS (Server) via Install-WindowsFeature - best-effort'; 
-     try { Install-WindowsFeature -Name Web-Server -IncludeManagementTools -ErrorAction Stop; Import-Module WebAdministration; $iisInstalled = $true; Write-Output 'IIS installed via Install-WindowsFeature' } catch { Write-Output 'Install-WindowsFeature failed or not available: ' + $_.Exception.Message } 
-   } ; ^
-   # If IIS module available, configure site
-   if ($iisInstalled) { 
-     Write-Output 'Configuring IIS site...'; 
-     try {
-       # Ensure Default Web Site exists and points to $deployDir
-       $site = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
-       if ($null -eq $site) {
-         Write-Output 'Default Web Site not found — creating a new Default Web Site bound to localhost:80'
-         New-Website -Name 'Default Web Site' -Port 80 -PhysicalPath $deployDir -Force
-       } else {
-         Write-Output 'Default Web Site exists — ensuring physical path points to deploy dir'
-         # Update the physical path of root application
-         Set-ItemProperty \"IIS:\\Sites\\Default Web Site\" -Name physicalPath -Value $deployDir -ErrorAction SilentlyContinue || Write-Output 'Could not set physicalPath via Set-ItemProperty; trying Set-WebConfigurationProperty'
-         # Also set physicalPath for the root application explicitly
-         Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter \"system.applicationHost/sites/site[@name='Default Web Site']/application[@path='/']/virtualDirectory[@path='/']\" -name physicalPath -value $deployDir -ErrorAction SilentlyContinue
-       }
-       # Start site & ensure started
-       Start-Service W3SVC -ErrorAction SilentlyContinue
-       Start-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
-       Write-Output 'Default Web Site started.'
-       # Ensure index.html is in default documents
-       $dd = Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter 'system.webServer/defaultDocument/files' -name '.' 
-       $hasIndex = $false
-       foreach ($item in $dd.Collection) { if ($item.value -eq 'index.html') { $hasIndex = $true } }
-       if (-not $hasIndex) { Write-Output 'Adding index.html to default documents'; Add-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter 'system.webServer/defaultDocument/files' -name '.' -value @{value='index.html'} }
-     } catch { Write-Output 'IIS configuration/website actions failed: ' + $_.Exception.Message }
-   } else {
-     Write-Output 'IIS not available on this machine; skipped site creation. If you want IIS-based hosting, install IIS manually or run on a Windows Server with IIS features.'
-   }
-   # Fix filesystem permissions so IIS can read (grant Read/Execute to IIS_IUSRS and DefaultAppPool identity)
-   Write-Output 'Setting folder permissions for IIS_IUSRS and DefaultAppPool (best-effort)...'
-   try { icacls $deployDir /grant 'IIS_IUSRS:(OI)(CI)RX' /T } catch { Write-Output 'icacls failed: ' + $_.Exception.Message }
-   # Also attempt to grant to IIS AppPool identity
-   try { icacls $deployDir /grant 'IIS AppPool\\DefaultAppPool:(OI)(CI)M' /T } catch { Write-Output 'grant to IIS AppPool identity failed (not critical): ' + $_.Exception.Message }
-   Write-Output '=== Deploy to IIS: Finished ==='
-  "
-'''
+        // Run PowerShell directly (not through 'bat') to avoid cmd/caret issues.
+        powershell script: '''
+Write-Output "=== Deploy to IIS: Starting ==="
+
+$deployDir = 'C:\inetpub\wwwroot'
+$src = $env:WORKSPACE
+
+Write-Output "Source workspace: $src"
+Write-Output "Target (IIS): $deployDir"
+
+# Ensure target exists
+if (-not (Test-Path $deployDir)) {
+    Write-Output "Creating target folder $deployDir"
+    New-Item -Path $deployDir -ItemType Directory -Force | Out-Null
+} else {
+    Write-Output "Target folder exists"
+}
+
+# Clean target (optional)
+Write-Output "Cleaning target (remove old files)"
+Get-ChildItem -Path $deployDir -Force | Where-Object { $_.Name -notin @('.', '..') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# Copy files from workspace to target (try robocopy then fallback to copy-item)
+Write-Output "Copying site files..."
+$robocopyExe = (Get-Command robocopy.exe -ErrorAction SilentlyContinue)
+if ($robocopyExe) {
+    Write-Output "Using robocopy..."
+    $rc = Start-Process -FilePath $robocopyExe.Path -ArgumentList @("$src","$deployDir","/MIR","/NDL","/NFL","/NJH","/NJS","/NP") -Wait -PassThru
+    if ($rc.ExitCode -gt 7) {
+        Write-Output "robocopy returned exit code $($rc.ExitCode) (failure) — attempting Copy-Item fallback"
+        Remove-Item -Recurse -Force -Path "$deployDir\*" -ErrorAction SilentlyContinue
+        Copy-Item -Path "$src\*" -Destination $deployDir -Recurse -Force
+    } else {
+        Write-Output "robocopy completed (exit $($rc.ExitCode))"
+    }
+} else {
+    Write-Output "robocopy not found — using Copy-Item"
+    Copy-Item -Path "$src\*" -Destination $deployDir -Recurse -Force
+}
+
+# Try to configure IIS if available
+$iisAvailable = $false
+try {
+    Import-Module WebAdministration -ErrorAction Stop
+    $iisAvailable = $true
+    Write-Output "WebAdministration module loaded — IIS available."
+} catch {
+    Write-Output "WebAdministration module not available: $($_.Exception.Message)"
+}
+
+if (-not $iisAvailable) {
+    # Try to install on systems where Install-WindowsFeature exists (best-effort)
+    try {
+        Write-Output "Attempting to install IIS via Install-WindowsFeature (best-effort)..."
+        Install-WindowsFeature -Name Web-Server -IncludeManagementTools -ErrorAction Stop
+        Import-Module WebAdministration -ErrorAction Stop
+        $iisAvailable = $true
+        Write-Output "IIS installed via Install-WindowsFeature."
+    } catch {
+        Write-Output "Install-WindowsFeature not available or failed: $($_.Exception.Message)"
+    }
+}
+
+if ($iisAvailable) {
+    try {
+        Write-Output "Configuring Default Web Site to point to $deployDir ..."
+        $site = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
+        if ($null -eq $site) {
+            Write-Output "Default Web Site not found — creating Default Web Site bound to localhost:80"
+            New-Website -Name 'Default Web Site' -Port 80 -PhysicalPath $deployDir -Force
+        } else {
+            Write-Output "Default Web Site exists — updating physical path"
+            # Update physical path for the root virtual directory/app
+            Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' `
+              -filter "system.applicationHost/sites/site[@name='Default Web Site']/application[@path='/']/virtualDirectory[@path='/']" `
+              -name physicalPath -value $deployDir -ErrorAction SilentlyContinue
         }
+
+        Write-Output "Starting W3SVC and Default Web Site..."
+        Start-Service W3SVC -ErrorAction SilentlyContinue
+        Start-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
+
+        # Ensure index.html is in Default Documents
+        $dd = Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter 'system.webServer/defaultDocument/files' -name '.'
+        $hasIndex = $false
+        foreach ($item in $dd.Collection) { if ($item.value -eq 'index.html') { $hasIndex = $true } }
+        if (-not $hasIndex) {
+            Write-Output "Adding index.html to default documents"
+            Add-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter 'system.webServer/defaultDocument/files' -name '.' -value @{value='index.html'}
+        }
+    } catch {
+        Write-Output "IIS config actions failed: $($_.Exception.Message)"
+    }
+} else {
+    Write-Output "IIS not available on this machine; skipped site creation. To host on IIS, install IIS and re-run."
+}
+
+# Set permissions so IIS can read the files (best-effort)
+Write-Output "Setting folder permissions for IIS_IUSRS (read/execute) ..."
+try {
+    icacls $deployDir /grant 'IIS_IUSRS:(OI)(CI)RX' /T | Out-Null
+} catch {
+    Write-Output "icacls grant failed: $($_.Exception.Message)"
+}
+
+Write-Output "=== Deploy to IIS: Finished ==="
+''', returnStatus: true
       }
     }
 
     stage('Verify site (http://localhost)') {
       steps {
-        script {
-          // Do a simple HTTP check to localhost
-          bat '''
-powershell -NoProfile -Command ^
-  "try { $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost/index.html' -TimeoutSec 10; if ($r.StatusCode -eq 200) { Write-Output 'HTTP_OK' ; exit 0 } else { Write-Output 'HTTP_NON200:' + $r.StatusCode ; exit 2 } } catch { Write-Output 'HTTP_ERROR:' + $_.Exception.Message ; exit 3 }"
-'''
-        }
+        powershell script: '''
+try {
+    $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost/index.html' -TimeoutSec 10
+    if ($r.StatusCode -eq 200) {
+        Write-Output "HTTP_OK"
+        exit 0
+    } else {
+        Write-Output "HTTP_NON200:" + $r.StatusCode
+        exit 2
+    }
+} catch {
+    Write-Output "HTTP_ERROR:" + $_.Exception.Message
+    exit 3
+}
+''', returnStatus: true
       }
     }
   }
