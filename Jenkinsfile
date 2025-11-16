@@ -2,165 +2,188 @@ pipeline {
   agent any
 
   environment {
-    DEPLOY_DIR = 'C:\\inetpub\\wwwroot' // still fine for Groovy env usage
+    // change if you want a subfolder: 'C:\\inetpub\\wwwroot\\withoutscm'
+    DEPLOY_DIR = 'C:\\inetpub\\wwwroot'
+    // set this credential in Jenkins (username/token or username/password) and reference here
     GIT_CREDS  = 'github-pat'
+    // git URL - update to your repo if different
+    GIT_URL    = 'https://github.com/iamanoj12/isepractice.git'
+    GIT_BRANCH = 'master'
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         echo "Cloning project from GitHub with credentialsId=${env.GIT_CREDS}"
-        git branch: 'master',
-            url: 'https://github.com/iamanoj12/isepractice.git',
+        git branch: "${env.GIT_BRANCH}",
+            url: "${env.GIT_URL}",
             credentialsId: "${env.GIT_CREDS}"
       }
     }
 
     stage('Build (none)') {
       steps {
-        echo "Static site — no build step."
+        echo 'Static site — no build step.'
+        // list files to help debugging
+        powershell 'Write-Output \"Workspace: $env:WORKSPACE\"; Get-ChildItem -Recurse -Force -Depth 2 | Select-Object FullName,Length | Format-Table -AutoSize'
       }
     }
 
-    stage('Deploy to IIS (localhost)') {
+    stage('Deploy to IIS (mirror workspace)') {
       steps {
-        // Run PowerShell directly (no cmd/caret issues). Use forward slashes in paths to avoid Groovy escaping problems.
-        powershell script: '''
-Write-Output "=== Deploy to IIS: Starting ==="
-
-# Use forward slashes inside the script to avoid Groovy/backslash parsing problems
-$deployDir = 'C:/inetpub/wwwroot'
+        powershell '''
+Write-Output "=== Deploy: Start ==="
 $src = $env:WORKSPACE
+$dst = "''' + "${DEPLOY_DIR}" + '''"
 
-Write-Output "Source workspace: $src"
-Write-Output "Target (IIS): $deployDir"
+Write-Output "Source: $src"
+Write-Output "Destination: $dst"
 
-# Ensure target exists
-if (-not (Test-Path $deployDir)) {
-    Write-Output "Creating target folder $deployDir"
-    New-Item -Path $deployDir -ItemType Directory -Force | Out-Null
+# Create destination if missing
+if (-not (Test-Path $dst)) {
+    Write-Output "Creating destination folder $dst"
+    New-Item -Path $dst -ItemType Directory -Force | Out-Null
 } else {
-    Write-Output "Target folder exists"
+    Write-Output "Destination already exists"
 }
 
-# Clean target (optional)
-Write-Output "Cleaning target (remove old files)"
-Get-ChildItem -Path $deployDir -Force | Where-Object { $_.Name -notin @('.', '..') } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-
-# Copy files from workspace to target (try robocopy then fallback to Copy-Item)
-Write-Output "Copying site files..."
-$robocopyExe = (Get-Command robocopy.exe -ErrorAction SilentlyContinue)
-if ($robocopyExe) {
-    Write-Output "Using robocopy..."
-    $rc = Start-Process -FilePath $robocopyExe.Path -ArgumentList @("$src","$deployDir","/MIR","/NDL","/NFL","/NJH","/NJS","/NP") -Wait -PassThru
-    if ($rc.ExitCode -gt 7) {
-        Write-Output "robocopy returned exit code $($rc.ExitCode) (failure) — attempting Copy-Item fallback"
-        Remove-Item -Recurse -Force -Path "$deployDir/*" -ErrorAction SilentlyContinue
-        Copy-Item -Path "$src/*" -Destination $deployDir -Recurse -Force
-    } else {
-        Write-Output "robocopy completed (exit $($rc.ExitCode))"
+# Attempt robocopy mirror
+$robocopy = Get-Command robocopy.exe -ErrorAction SilentlyContinue
+if ($robocopy) {
+    Write-Output "Using robocopy to mirror workspace -> destination"
+    # /MIR mirrors; /XD excludes .git; /NFL/NJS reduce log noise
+    $args = @($src, $dst, '/MIR', '/XD', '.git','.svn','.jenkins', '/NFL','/NDL','/NJH','/NJS','/NP')
+    $proc = Start-Process -FilePath $robocopy.Path -ArgumentList $args -Wait -PassThru
+    Write-Output "robocopy exit code: $($proc.ExitCode)"
+    if ($proc.ExitCode -ge 8) {
+        Write-Output "robocopy reported failure (exit >=8). Falling back to Copy-Item after cleaning target."
+        Remove-Item -Path (Join-Path $dst '*') -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
     }
 } else {
-    Write-Output "robocopy not found — using Copy-Item"
-    Copy-Item -Path "$src/*" -Destination $deployDir -Recurse -Force
+    Write-Output "robocopy not found — using Copy-Item fallback"
+    Remove-Item -Path (Join-Path $dst '*') -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
 }
 
-# Try to configure IIS if available
+Write-Output "Deploy copying complete."
+Write-Output "=== Deploy: End ==="
+'''
+      }
+    }
+
+    stage('IIS ensure & configure') {
+      steps {
+        powershell '''
+Write-Output "=== IIS Setup: Start ==="
+
+$dst = "''' + "${DEPLOY_DIR}" + '''"
+
+# Try to import WebAdministration
 $iisAvailable = $false
 try {
     Import-Module WebAdministration -ErrorAction Stop
     $iisAvailable = $true
-    Write-Output "WebAdministration module loaded — IIS available."
+    Write-Output "WebAdministration loaded: IIS management available."
 } catch {
     Write-Output "WebAdministration module not available: $($_.Exception.Message)"
 }
 
+# If not available, try installing (best-effort; requires admin and appropriate OS)
 if (-not $iisAvailable) {
-    # Try to install on systems where Install-WindowsFeature exists (best-effort)
     try {
-        Write-Output "Attempting to install IIS via Install-WindowsFeature (best-effort)..."
+        Write-Output "Attempting to install IIS (Install-WindowsFeature/Web-Server). This may fail on some SKUs..."
         Install-WindowsFeature -Name Web-Server -IncludeManagementTools -ErrorAction Stop
         Import-Module WebAdministration -ErrorAction Stop
         $iisAvailable = $true
-        Write-Output "IIS installed via Install-WindowsFeature."
+        Write-Output "IIS installed and WebAdministration module loaded."
     } catch {
-        Write-Output "Install-WindowsFeature not available or failed: $($_.Exception.Message)"
+        Write-Output "IIS install attempt failed or not supported: $($_.Exception.Message)"
     }
 }
 
 if ($iisAvailable) {
+    Write-Output "Configuring Default Web Site to use path: $dst"
     try {
-        Write-Output "Configuring Default Web Site to point to $deployDir ..."
         $site = Get-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
         if ($null -eq $site) {
-            Write-Output "Default Web Site not found — creating Default Web Site bound to localhost:80"
-            New-Website -Name 'Default Web Site' -Port 80 -PhysicalPath $deployDir -Force
+            Write-Output "Default Web Site not found — creating it bound to port 80."
+            New-Website -Name 'Default Web Site' -Port 80 -PhysicalPath $dst -Force
         } else {
             Write-Output "Default Web Site exists — updating physical path"
-            Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' `
-              -filter "system.applicationHost/sites/site[@name='Default Web Site']/application[@path='/']/virtualDirectory[@path='/']" `
-              -name physicalPath -value $deployDir -ErrorAction SilentlyContinue
+            Set-ItemProperty "IIS:\\Sites\\Default Web Site" -Name physicalPath -Value $dst -ErrorAction SilentlyContinue
         }
 
-        Write-Output "Starting W3SVC and Default Web Site..."
-        Start-Service W3SVC -ErrorAction SilentlyContinue
-        Start-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
-
-        # Ensure index.html is in Default Documents
+        Write-Output "Ensuring Default Document contains index.html"
         $dd = Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter 'system.webServer/defaultDocument/files' -name '.'
         $hasIndex = $false
-        foreach ($item in $dd.Collection) { if ($item.value -eq 'index.html') { $hasIndex = $true } }
+        foreach ($i in $dd.Collection) { if ($i.value -eq 'index.html') { $hasIndex = $true } }
         if (-not $hasIndex) {
-            Write-Output "Adding index.html to default documents"
             Add-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST' -filter 'system.webServer/defaultDocument/files' -name '.' -value @{value='index.html'}
+            Write-Output "Added index.html to default documents"
         }
+
+        Write-Output "Starting W3SVC and Default Web Site"
+        Start-Service W3SVC -ErrorAction SilentlyContinue
+        Start-Website -Name 'Default Web Site' -ErrorAction SilentlyContinue
     } catch {
-        Write-Output "IIS config actions failed: $($_.Exception.Message)"
+        Write-Output "IIS config error: $($_.Exception.Message)"
     }
 } else {
-    Write-Output "IIS not available on this machine; skipped site creation. To host on IIS, install IIS and re-run."
+    Write-Output "IIS not available — skipped site creation/config. To host, install IIS on this machine."
 }
 
-# Set permissions so IIS can read the files (best-effort)
-Write-Output "Setting folder permissions for IIS_IUSRS (read/execute) ..."
+# Set permissions so IIS can read files (IIS_IUSRS read/execute)
 try {
-    icacls $deployDir /grant 'IIS_IUSRS:(OI)(CI)RX' /T | Out-Null
+    icacls $dst /grant 'IIS_IUSRS:(OI)(CI)RX' /T | Out-Null
+    Write-Output "Granted IIS_IUSRS read/execute on $dst"
 } catch {
-    Write-Output "icacls grant failed: $($_.Exception.Message)"
+    Write-Output "icacls failed: $($_.Exception.Message)"
 }
 
-Write-Output "=== Deploy to IIS: Finished ==="
-''', returnStatus: true
+Write-Output "=== IIS Setup: End ==="
+'''
       }
     }
 
-    stage('Verify site (http://localhost)') {
+    stage('Verify site (localhost)') {
       steps {
-        powershell script: '''
+        powershell '''
+Write-Output "=== Verifying http://localhost/index.html ==="
 try {
-    $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost/index.html' -TimeoutSec 10
-    if ($r.StatusCode -eq 200) {
+    $resp = Invoke-WebRequest -Uri "http://localhost/index.html" -UseBasicParsing -TimeoutSec 10
+    Write-Output ("HTTP Status: " + $resp.StatusCode)
+    if ($resp.RawContentLength -ne $null) { Write-Output ("Content-Length: " + $resp.RawContentLength) }
+    Write-Output "--- Page Snippet ---"
+    $snippet = if ($resp.Content.Length -gt 300) { $resp.Content.Substring(0,300) + "...(truncated)" } else { $resp.Content }
+    Write-Output $snippet
+
+    if ($resp.StatusCode -eq 200) {
         Write-Output "HTTP_OK"
         exit 0
     } else {
-        Write-Output "HTTP_NON200:" + $r.StatusCode
+        Write-Output "HTTP_NON200"
         exit 2
     }
 } catch {
-    Write-Output "HTTP_ERROR:" + $_.Exception.Message
+    Write-Output ("HTTP_ERROR: " + $_.Exception.Message)
     exit 3
 }
-''', returnStatus: true
+'''
       }
     }
-  }
+
+  } // stages
 
   post {
     success {
-      echo "Deployment finished. Open http://localhost/index.html on this machine."
+      echo "✅ Deployment finished. From this server open: http://localhost/index.html"
+      echo "✅ From another machine open: http://<server-ip-or-hostname>/ (or /index.html)"
     }
     failure {
-      echo "Deployment failed — check console output above. If IIS is not installed on this host, install it and re-run, or ask me to modify the script for your environment."
+      echo "❌ Deployment or verification failed — check console output above for errors."
+      echo "If IIS is not installed on this host, install IIS or change DEPLOY_DIR to point to a host that serves static files."
     }
   }
 }
