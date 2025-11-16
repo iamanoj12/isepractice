@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Manoj Aryal — Portfolio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <h1>Manoj Aryal</h1>
+    <nav>
+      <a href="index.html">Home</a>
+      <a href="about.html">About</a>
+    </nav>
+  </header>
+
+  <main class="content">
+    <section class="hero">
+      <img src="https://via.placeholder.com/160" alt="Profile photo" class="avatar"/>
+      <h2>Hi — I'm Manoj</h2>
+      <p>Student of CSE | Building simple, clean web projects and fitness apps. This is a small two-page portfolio demonstration.</p>
+      <p class="cta"><a href="about.html">Learn more →</a></p>
+    </section>
+
+    <section class="skills">
+      <h3>Skills & Interests</h3>
+      <ul>
+        <li>HTML, CSS, JavaScript</li>
+        <li>Flutter & Mobile Development</li>
+        <li>Machine Learning & Data Science</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <small>© <span id="year"></span> Manoj Aryal</small>
+  </footer>
+
+  <script>
+    document.getElementById('year').textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>
